@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Recorder Transcripts</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="header">
+        <div class="brand">
+          <div class="logo" aria-hidden="true"></div>
+          <div>
+            <h1>Recorder Transcripts</h1>
+            <p class="subtitle">Batch .txt export</p>
+          </div>
+        </div>
+        <span id="statusPill" class="pill idle">Idle</span>
+      </header>
+
+      <section class="card">
+        <div class="label-row">
+          <span class="label">Date range</span>
+          <span class="hint">Created on · inclusive</span>
+        </div>
+        <div class="presets" id="presets" role="group" aria-label="Date presets">
+          <button type="button" class="chip" data-preset="today">Today</button>
+          <button type="button" class="chip" data-preset="yesterday">Yesterday</button>
+          <button type="button" class="chip" data-preset="last3">3 days</button>
+          <button type="button" class="chip" data-preset="last7">7 days</button>
+          <button type="button" class="chip" data-preset="last14">14 days</button>
+          <button type="button" class="chip" data-preset="thisMonth">Month</button>
+        </div>
+        <div class="dates">
+          <label class="field">
+            <span>Start</span>
+            <input type="date" id="startDate" />
+          </label>
+          <label class="field">
+            <span>End</span>
+            <input type="date" id="endDate" />
+          </label>
+        </div>
+      </section>
+
+      <section class="card options">
+        <div class="label-row">
+          <span class="label">Options</span>
+        </div>
+        <label class="toggle">
+          <input type="checkbox" id="dryRun" />
+          <span class="toggle-ui"></span>
+          <span class="toggle-text">
+            <strong>Dry-run</strong>
+            <small>List matches only — no downloads</small>
+          </span>
+        </label>
+        <label class="toggle">
+          <input type="checkbox" id="force" />
+          <span class="toggle-ui"></span>
+          <span class="toggle-text">
+            <strong>Force re-download</strong>
+            <small>Ignore prior Downloads with same name</small>
+          </span>
+        </label>
+        <label class="toggle">
+          <input type="checkbox" id="exportManifest" checked />
+          <span class="toggle-ui"></span>
+          <span class="toggle-text">
+            <strong>Export manifest</strong>
+            <small>JSON summary when finished</small>
+          </span>
+        </label>
+      </section>
+
+      <section class="actions">
+        <button type="button" id="btnOpen" class="btn ghost">Open Recorder</button>
+        <button type="button" id="btnStart" class="btn primary">Start</button>
+        <button type="button" id="btnCancel" class="btn danger hidden">Cancel</button>
+      </section>
+
+      <section class="card progress-card">
+        <div class="label-row">
+          <span class="label">Progress</span>
+          <span id="progressMeta" class="hint">—</span>
+        </div>
+        <div class="bar-track" aria-hidden="true">
+          <div id="barFill" class="bar-fill"></div>
+        </div>
+        <p id="statusMessage" class="status-msg">Set a date range and press Start.</p>
+        <ul id="resultList" class="result-list"></ul>
+      </section>
+
+      <footer class="footer">
+        <button type="button" id="btnManifest" class="linkish" disabled>
+          Download manifest again
+        </button>
+        <span class="footer-note">Saves to Chrome Downloads · .txt only</span>
+      </footer>
+    </div>
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>
