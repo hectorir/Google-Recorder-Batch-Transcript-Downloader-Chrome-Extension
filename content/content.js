@@ -33,93 +33,234 @@
     }
   }
 
-  async function listRecordings() {
+  const MONTHS = {
+    Jan: 1, Feb: 2, Mar: 3, Apr: 4, May: 5, Jun: 6,
+    Jul: 7, Aug: 8, Sep: 9, Oct: 10, Nov: 11, Dec: 12,
+  };
+
+  /** Parse "2026 Jul 17" → local midnight Date, or null. */
+  function parseRecorderLabel(label) {
+    if (!label) return null;
+    const m = /(\d{4})\s+([A-Za-z]+)\s+(\d{1,2})/.exec(String(label).trim());
+    if (!m) return null;
+    const mon = MONTHS[m[2].slice(0, 3)];
+    if (!mon) return null;
+    const d = new Date(Number(m[1]), mon - 1, Number(m[3]));
+    if (Number.isNaN(d.getTime())) return null;
+    d.setHours(0, 0, 0, 0);
+    return d;
+  }
+
+  function parseISODate(s) {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(s || "").trim());
+    if (!m) return null;
+    const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+    if (Number.isNaN(d.getTime())) return null;
+    d.setHours(0, 0, 0, 0);
+    return d;
+  }
+
+  function scrapeSidebarItems() {
+    const items = [];
+    for (const el of allDeep()) {
+      if (
+        !(
+          el.classList &&
+          el.classList.contains("item") &&
+          el.getAttribute("role") === "button"
+        )
+      ) {
+        continue;
+      }
+      let title = "";
+      let created = "";
+      let duration = "";
+      for (const d of allDeep(el)) {
+        const a = d.getAttribute?.("aria-label") || "";
+        if (a.startsWith("Created on ")) created = a.replace("Created on ", "").trim();
+        if (a.startsWith("Duration is ")) duration = a;
+        if (d.classList && d.classList.contains("title")) {
+          title = (d.innerText || "").trim();
+        }
+      }
+      if (!title) {
+        const cont = allDeep(el).find(
+          (x) => x.classList && x.classList.contains("container")
+        );
+        if (cont) title = (cont.innerText || "").trim().split("\n")[0].trim();
+      }
+      if (!title) title = (el.innerText || "").trim().split("\n")[0].trim();
+      items.push({
+        title,
+        created,
+        duration,
+        selected: el.classList.contains("selected"),
+      });
+    }
+    return items;
+  }
+
+  function clickLoadMore() {
+    for (const el of allDeep()) {
+      const t = (el.innerText || "").trim();
+      const r = el.getBoundingClientRect();
+      if (
+        t === "Load more" &&
+        r.width > 0 &&
+        r.height > 0 &&
+        (el.tagName === "BUTTON" || el.tagName === "MWC-BUTTON")
+      ) {
+        el.scrollIntoView({ block: "center" });
+        el.click();
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function scrollSidebarDown() {
+    for (const el of allDeep()) {
+      if (
+        el.scrollHeight > el.clientHeight + 50 &&
+        el.clientWidth < 420 &&
+        el.clientWidth > 180
+      ) {
+        el.scrollTop = el.scrollHeight;
+      }
+    }
+  }
+
+  /**
+   * List sidebar items. Recorder is newest-first — stop loading once the
+   * oldest visible "Created on" date is strictly before the range start.
+   * Further pages can only be older and cannot match.
+   */
+  async function listRecordings({ startISO, endISO, labels } = {}) {
+    const start = parseISODate(startISO);
+    const end = parseISODate(endISO);
+    const labelSet = new Set(labels || []);
+    const startMs = start ? start.getTime() : null;
+    const endMs = end ? end.getTime() : null;
+
     let items = [];
     let stable = 0;
     let prevCount = -1;
+    let stopReason = "max_passes";
 
-    for (let attempt = 0; attempt < 25; attempt++) {
+    // Cap still exists as a safety net; early-stop usually exits much sooner.
+    for (let attempt = 0; attempt < 40; attempt++) {
       if (jobCancel) throw new Error("Cancelled");
 
-      let clicked = false;
-      for (const el of allDeep()) {
-        const t = (el.innerText || "").trim();
-        const r = el.getBoundingClientRect();
-        if (
-          t === "Load more" &&
-          r.width > 0 &&
-          r.height > 0 &&
-          (el.tagName === "BUTTON" || el.tagName === "MWC-BUTTON")
-        ) {
-          el.scrollIntoView({ block: "center" });
-          el.click();
-          clicked = true;
-          break;
-        }
-      }
-      if (clicked) await sleep(1400);
+      items = scrapeSidebarItems();
 
-      for (const el of allDeep()) {
-        if (
-          el.scrollHeight > el.clientHeight + 50 &&
-          el.clientWidth < 420 &&
-          el.clientWidth > 180
-        ) {
-          el.scrollTop = el.scrollHeight;
-        }
+      // Dedup as we go (stable identity)
+      const seen = new Set();
+      const unique = [];
+      for (const it of items) {
+        const key = `${it.title}||${it.created}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        unique.push(it);
       }
-      await sleep(700);
+      items = unique;
 
-      items = [];
-      for (const el of allDeep()) {
-        if (
-          !(
-            el.classList &&
-            el.classList.contains("item") &&
-            el.getAttribute("role") === "button"
-          )
-        ) {
-          continue;
-        }
-        let title = "";
-        let created = "";
-        let duration = "";
-        for (const d of allDeep(el)) {
-          const a = d.getAttribute?.("aria-label") || "";
-          if (a.startsWith("Created on ")) created = a.replace("Created on ", "").trim();
-          if (a.startsWith("Duration is ")) duration = a;
-          if (d.classList && d.classList.contains("title")) {
-            title = (d.innerText || "").trim();
+      // Parse dates; find oldest visible (list is newest → oldest)
+      let oldestMs = null;
+      let newestMs = null;
+      let datedCount = 0;
+      let matchCount = 0;
+      for (const it of items) {
+        const d = parseRecorderLabel(it.created);
+        if (d) {
+          datedCount += 1;
+          const t = d.getTime();
+          if (oldestMs === null || t < oldestMs) oldestMs = t;
+          if (newestMs === null || t > newestMs) newestMs = t;
+          if (startMs != null && endMs != null && t >= startMs && t <= endMs) {
+            matchCount += 1;
+          } else if (startMs == null && labelSet.has(it.created)) {
+            matchCount += 1;
           }
+        } else if (labelSet.has(it.created)) {
+          matchCount += 1;
         }
-        if (!title) {
-          const cont = allDeep(el).find(
-            (x) => x.classList && x.classList.contains("container")
-          );
-          if (cont) title = (cont.innerText || "").trim().split("\n")[0].trim();
-        }
-        if (!title) title = (el.innerText || "").trim().split("\n")[0].trim();
-        items.push({
-          title,
-          created,
-          duration,
-          selected: el.classList.contains("selected"),
-        });
       }
+
+      // Early stop: oldest item is older than range start → everything
+      // further down is also older (sorted newest-first).
+      const pastRangeStart =
+        startMs != null && oldestMs != null && oldestMs < startMs;
 
       send({
         type: "list_progress",
         attempt: attempt + 1,
         count: items.length,
-        loadMore: clicked,
+        matchCount,
+        datedCount,
+        oldestLabel:
+          oldestMs != null
+            ? items.map((i) => i.created).filter(Boolean).slice(-1)[0] || null
+            : null,
+        pastRangeStart,
+        loadMore: false,
       });
 
-      if (items.length === prevCount && !clicked) stable += 1;
-      else stable = 0;
-      prevCount = items.length;
-      if (stable >= 2) break;
+      if (pastRangeStart) {
+        stopReason = "past_range_start";
+        send({
+          type: "status",
+          message: `List complete (passed date range after ${items.length} items, ${matchCount} match(es))`,
+        });
+        break;
+      }
+
+      // Need more history: scroll + Load more only if still inside/above range
+      const clicked = clickLoadMore();
+      if (clicked) await sleep(1200);
+      scrollSidebarDown();
+      await sleep(clicked ? 500 : 400);
+
+      // Re-scrape after load/scroll for stable comparison
+      const after = scrapeSidebarItems();
+      const afterCount = after.length;
+
+      send({
+        type: "list_progress",
+        attempt: attempt + 1,
+        count: afterCount,
+        matchCount,
+        loadMore: clicked,
+        pastRangeStart: false,
+      });
+
+      if (afterCount === prevCount && !clicked) {
+        stable += 1;
+      } else {
+        stable = 0;
+      }
+      prevCount = afterCount;
+
+      if (stable >= 2) {
+        stopReason = "list_exhausted";
+        items = after;
+        // final dedup
+        const s2 = new Set();
+        const u2 = [];
+        for (const it of after) {
+          const key = `${it.title}||${it.created}`;
+          if (s2.has(key)) continue;
+          s2.add(key);
+          u2.push(it);
+        }
+        items = u2;
+        break;
+      }
+
+      // Use post-scroll items for next loop iteration
+      items = after;
     }
 
+    // Final dedup
     const seen = new Set();
     const unique = [];
     for (const it of items) {
@@ -128,7 +269,33 @@
       seen.add(key);
       unique.push(it);
     }
-    return unique;
+
+    send({
+      type: "list_progress",
+      attempt: "done",
+      count: unique.length,
+      stopReason,
+    });
+
+    return { items: unique, stopReason };
+  }
+
+  function filterMatches(items, { startISO, endISO, labels }) {
+    const start = parseISODate(startISO);
+    const end = parseISODate(endISO);
+    const labelSet = new Set(labels || []);
+    const startMs = start ? start.getTime() : null;
+    const endMs = end ? end.getTime() : null;
+
+    return items.filter((it) => {
+      const d = parseRecorderLabel(it.created);
+      if (d && startMs != null && endMs != null) {
+        const t = d.getTime();
+        return t >= startMs && t <= endMs;
+      }
+      // Fallback: exact Created-on label strings from the SW
+      return labelSet.has(it.created);
+    });
   }
 
   async function clickSidebarItem(title, created) {
@@ -375,12 +542,18 @@
     jobCancel = false;
     pendingTargets = null;
 
-    const labels = new Set(options.labels || []);
-
     try {
-      send({ type: "status", message: "Listing recordings…" });
-      const all = await listRecordings();
-      const targets = all.filter((it) => labels.has(it.created));
+      send({ type: "status", message: "Listing recordings (newest first, early-stop)…" });
+      const { items: all, stopReason } = await listRecordings({
+        startISO: options.startISO,
+        endISO: options.endISO,
+        labels: options.labels || [],
+      });
+      const targets = filterMatches(all, {
+        startISO: options.startISO,
+        endISO: options.endISO,
+        labels: options.labels || [],
+      });
       pendingTargets = targets;
 
       send({
@@ -388,6 +561,7 @@
         totalSidebar: all.length,
         matchCount: targets.length,
         matches: targets,
+        stopReason,
       });
 
       if (options.dryRun) {

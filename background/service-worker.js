@@ -199,6 +199,8 @@ async function startJob(options) {
     action: "start",
     options: {
       labels,
+      startISO: start,
+      endISO: end,
       dryRun: !!dryRun,
       force: !!force,
       waitForContinue: !dryRun,
@@ -336,18 +338,31 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     (async () => {
       const state = await getState();
       switch (msg.type) {
-        case "list_progress":
+        case "list_progress": {
+          let message = `Listing… pass ${msg.attempt} (${msg.count} items)`;
+          if (typeof msg.matchCount === "number") {
+            message += ` · ${msg.matchCount} in range`;
+          }
+          if (msg.pastRangeStart) {
+            message += " · past range, stopping";
+          }
+          if (msg.stopReason === "past_range_start") {
+            message = `List done early (passed date range) · ${msg.count} scanned`;
+          } else if (msg.stopReason === "list_exhausted") {
+            message = `List exhausted · ${msg.count} items`;
+          }
           await setState({
-            message: `Listing… pass ${msg.attempt} (${msg.count} items)`,
+            message,
             listPasses: [...(state.listPasses || []).slice(-20), msg],
           });
           break;
+        }
 
         case "listed":
           await setState({
             matches: msg.matches || [],
             total: msg.matchCount || 0,
-            message: `Found ${msg.matchCount} match(es) of ${msg.totalSidebar} recordings`,
+            message: `Found ${msg.matchCount} match(es) after scanning ${msg.totalSidebar} (stop: ${msg.stopReason || "n/a"})`,
           });
           if (state.dryRun) {
             // Wait for content "complete" for final status + optional manifest
