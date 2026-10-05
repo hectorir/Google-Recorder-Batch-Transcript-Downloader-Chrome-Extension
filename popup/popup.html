@@ -72,12 +72,31 @@
             <small>JSON summary when finished</small>
           </span>
         </label>
+        <label class="toggle">
+          <input type="checkbox" id="experimental" />
+          <span class="toggle-ui"></span>
+          <span class="toggle-text">
+            <strong>Experimental: read transcript directly</strong>
+            <small>Skip the Download menu; copy text from the Transcript view</small>
+          </span>
+        </label>
+        <label class="field" style="margin-top: 4px;">
+          <span>Pacing delay between downloads</span>
+          <select id="delaySeconds">
+            <option value="0">No delay</option>
+            <option value="2">2 seconds (fast)</option>
+            <option value="4" selected>4 seconds (recommended)</option>
+            <option value="7">7 seconds (safe)</option>
+            <option value="10">10 seconds (extra safe)</option>
+          </select>
+        </label>
       </section>
 
       <section class="actions">
         <button type="button" id="btnOpen" class="btn ghost">Open Recorder</button>
         <button type="button" id="btnStart" class="btn primary">Start</button>
-        <button type="button" id="btnCancel" class="btn danger hidden">Cancel</button>
+        <button type="button" id="btnPause" class="btn warning hidden">Pause</button>
+        <button type="button" id="btnStop" class="btn danger hidden">Stop</button>
       </section>
 
       <section class="card progress-card">

@@ -8,9 +8,12 @@ const els = {
   dryRun: $("dryRun"),
   force: $("force"),
   exportManifest: $("exportManifest"),
+  experimental: $("experimental"),
+  delaySeconds: $("delaySeconds"),
   btnOpen: $("btnOpen"),
   btnStart: $("btnStart"),
-  btnCancel: $("btnCancel"),
+  btnPause: $("btnPause"),
+  btnStop: $("btnStop"),
   btnManifest: $("btnManifest"),
   statusPill: $("statusPill"),
   statusMessage: $("statusMessage"),
@@ -123,15 +126,35 @@ function renderState(state) {
     })
     .join("");
 
-  const busy = status === "listing" || status === "running";
+  const busy = status === "listing" || status === "running" || status === "paused";
+  const isRunning = status === "running";
+  const isPaused = status === "paused";
+
   els.btnStart.disabled = busy;
   els.btnOpen.disabled = busy;
-  els.btnCancel.classList.toggle("hidden", !busy);
+
+  // Pause / Resume toggle button
+  if (isRunning) {
+    els.btnPause.classList.remove("hidden");
+    els.btnPause.textContent = "Pause";
+  } else if (isPaused) {
+    els.btnPause.classList.remove("hidden");
+    els.btnPause.textContent = "Resume";
+  } else {
+    els.btnPause.classList.add("hidden");
+  }
+
+  // Stop button
+  els.btnStop.classList.toggle("hidden", !busy);
+  els.actions.classList.toggle("is-busy", busy);
   els.actions.classList.toggle("has-cancel", busy);
+
   els.btnManifest.disabled = !(state.results || []).length && !(state.matches || []).length;
   els.dryRun.disabled = busy;
   els.force.disabled = busy;
   els.exportManifest.disabled = busy;
+  els.experimental.disabled = busy;
+  els.delaySeconds.disabled = busy;
   els.startDate.disabled = busy;
   els.endDate.disabled = busy;
 }
@@ -184,6 +207,8 @@ els.btnStart.addEventListener("click", async () => {
       dryRun: els.dryRun.checked,
       force: els.force.checked,
       exportManifest: els.exportManifest.checked,
+      experimental: els.experimental.checked,
+      delaySeconds: Number.isFinite(Number(els.delaySeconds.value)) ? Number(els.delaySeconds.value) : 4,
     },
   });
   if (!res?.ok) {
@@ -194,8 +219,18 @@ els.btnStart.addEventListener("click", async () => {
   await refresh();
 });
 
-els.btnCancel.addEventListener("click", async () => {
-  await send("cancel");
+els.btnPause.addEventListener("click", async () => {
+  const isPaused = els.statusPill.textContent.toLowerCase() === "paused";
+  if (isPaused) {
+    await send("resume");
+  } else {
+    await send("pause");
+  }
+  await refresh();
+});
+
+els.btnStop.addEventListener("click", async () => {
+  await send("stop");
   await refresh();
 });
 
@@ -215,12 +250,16 @@ async function restoreOptions() {
     "optDryRun",
     "optForce",
     "optManifest",
+    "optExperimental",
+    "optDelay",
     "optStart",
     "optEnd",
   ]);
   if (typeof data.optDryRun === "boolean") els.dryRun.checked = data.optDryRun;
   if (typeof data.optForce === "boolean") els.force.checked = data.optForce;
   if (typeof data.optManifest === "boolean") els.exportManifest.checked = data.optManifest;
+  if (typeof data.optExperimental === "boolean") els.experimental.checked = data.optExperimental;
+  if (data.optDelay) els.delaySeconds.value = data.optDelay;
   if (data.optStart && data.optEnd) {
     setDates(data.optStart, data.optEnd);
     setActivePreset(null);
@@ -234,12 +273,14 @@ function persistOptions() {
     optDryRun: els.dryRun.checked,
     optForce: els.force.checked,
     optManifest: els.exportManifest.checked,
+    optExperimental: els.experimental.checked,
+    optDelay: els.delaySeconds.value,
     optStart: els.startDate.value,
     optEnd: els.endDate.value,
   });
 }
 
-for (const el of [els.dryRun, els.force, els.exportManifest, els.startDate, els.endDate]) {
+for (const el of [els.dryRun, els.force, els.exportManifest, els.experimental, els.delaySeconds, els.startDate, els.endDate]) {
   el.addEventListener("change", persistOptions);
 }
 

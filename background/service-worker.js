@@ -11,6 +11,7 @@ const defaultState = () => ({
   dryRun: false,
   force: false,
   exportManifest: true,
+  experimental: false,
   start: null,
   end: null,
   labels: [],
@@ -34,22 +35,76 @@ async function setState(patch) {
   const next = { ...prev, ...patch, updatedAt: Date.now() };
   await chrome.storage.session.set({ [STATE_KEY]: next });
   try {
-    chrome.runtime.sendMessage({ source: "recorder-sw", type: "state", state: next });
+    chrome.runtime
+      .sendMessage({ source: "recorder-sw", type: "state", state: next })
+      .catch(() => {}); // popup closed: no receiver
   } catch {
     /* no listeners */
   }
   return next;
 }
 
-// ---- Download filename control ----
-let expectedFilename = null;
+// ---- Automatic downloads permission helper ----
+async function allowAutomaticDownloads() {
+  try {
+    if (chrome.contentSettings?.automaticDownloads) {
+      await chrome.contentSettings.automaticDownloads.set({
+        primaryPattern: "https://recorder.google.com/*",
+        setting: "allow",
+      });
+      console.log("[SW] automaticDownloads set to allow for recorder.google.com");
+    }
+  } catch (err) {
+    console.warn("[SW] Could not configure automaticDownloads:", err);
+  }
+}
+allowAutomaticDownloads();
+
+// ---- Download tracking & filename control (FIFO queue) ----
+const expectedFilenames = [];
+const directDownloadNames = new Map(); // data: URL -> filename
+const downloadWaiters = [];
+let lastDownloadCreated = 0;
+let lastDownloadItem = null;
+
+chrome.downloads.onCreated.addListener((item) => {
+  console.log("[SW] chrome.downloads.onCreated:", item.id, item.url || "");
+  lastDownloadCreated = Date.now();
+  lastDownloadItem = item;
+  if (downloadWaiters.length > 0) {
+    const waiter = downloadWaiters.shift();
+    waiter(item);
+  }
+});
+
+chrome.downloads.onChanged.addListener((delta) => {
+  if (delta.state) {
+    console.log(`[SW] Download ${delta.id} state:`, delta.state.current);
+  }
+  if (delta.error) {
+    console.warn(`[SW] Download ${delta.id} error:`, delta.error.current);
+  }
+});
 
 chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
-  if (!expectedFilename) return false;
-  // Recorder may download as UUID without extension or as .txt
-  suggest({ filename: expectedFilename, conflictAction: "uniquify" });
-  expectedFilename = null;
-  return true;
+  // Transcript data: URLs get their name from directDownloadNames (Chrome would otherwise say download.txt)
+  if (item.url && directDownloadNames.has(item.url)) {
+    const fn = directDownloadNames.get(item.url);
+    directDownloadNames.delete(item.url);
+    suggest({ filename: fn, conflictAction: "uniquify" });
+    return;
+  }
+  // Never rename other data: URL downloads (like manifest JSON exports)
+  if (item.url && item.url.startsWith("data:")) {
+    return false;
+  }
+  if (expectedFilenames.length > 0) {
+    const fn = expectedFilenames.shift();
+    console.log("[SW] onDeterminingFilename renaming to:", fn);
+    suggest({ filename: fn, conflictAction: "uniquify" });
+    return; // Synchronous suggest MUST NOT return true in Chrome MV3
+  }
+  return false;
 });
 
 async function findRecorderTab() {
@@ -98,7 +153,66 @@ function waitTabComplete(tabId, timeoutMs = 45000) {
   });
 }
 
+async function injectMainHook(tabId) {
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      world: "MAIN",
+      func: () => {
+        if (window.__recorderHookInstalled) return;
+        window.__recorderHookInstalled = true;
+
+        const origCreateObjectURL = URL.createObjectURL;
+        URL.createObjectURL = function (obj) {
+          const url = origCreateObjectURL.call(this, obj);
+          try {
+            if (obj instanceof Blob) {
+              if (!obj.type || obj.type.includes("text") || obj.type.includes("plain")) {
+                obj.text().then((text) => {
+                  window.postMessage(
+                    {
+                      source: "recorder-main-interceptor",
+                      type: "blob_created",
+                      url,
+                      text,
+                      size: obj.size,
+                    },
+                    "*"
+                  );
+                }).catch(() => {});
+              }
+            }
+          } catch (e) {}
+          return url;
+        };
+
+        const origAnchorClick = HTMLAnchorElement.prototype.click;
+        HTMLAnchorElement.prototype.click = function () {
+          try {
+            if (this.download || (this.href && (this.href.startsWith("blob:") || this.href.startsWith("data:")))) {
+              window.postMessage(
+                {
+                  source: "recorder-main-interceptor",
+                  type: "anchor_click",
+                  download: this.download,
+                  href: this.href,
+                },
+                "*"
+              );
+            }
+          } catch (e) {}
+          return origAnchorClick.apply(this, arguments);
+        };
+        console.log("[Recorder SW] Main world hook successfully installed!");
+      },
+    });
+  } catch (err) {
+    console.warn("[SW] Could not inject main world hook:", err);
+  }
+}
+
 async function injectContent(tabId) {
+  await injectMainHook(tabId);
   try {
     const res = await chrome.tabs.sendMessage(tabId, {
       target: "recorder-content",
@@ -151,7 +265,7 @@ async function searchExistingTxtNames(names) {
 }
 
 async function startJob(options) {
-  const { start, end, dryRun, force, exportManifest } = options;
+  const { start, end, dryRun, force, exportManifest, experimental, delaySeconds } = options;
   let labels;
   try {
     labels = daterangeLabels(start, end);
@@ -164,6 +278,8 @@ async function startJob(options) {
     throw e;
   }
 
+  await allowAutomaticDownloads();
+  expectedFilenames.length = 0;
   chrome.alarms.create("job-keepalive", { delayInMinutes: 0.4 });
 
   await setState({
@@ -173,6 +289,8 @@ async function startJob(options) {
     dryRun: !!dryRun,
     force: !!force,
     exportManifest: exportManifest !== false,
+    experimental: !!experimental,
+    delaySeconds: Number.isFinite(Number(delaySeconds)) ? Number(delaySeconds) : 4,
     start,
     end,
     labels,
@@ -203,6 +321,8 @@ async function startJob(options) {
       endISO: end,
       dryRun: !!dryRun,
       force: !!force,
+      experimental: !!experimental,
+      delaySeconds: Number.isFinite(Number(delaySeconds)) ? Number(delaySeconds) : 4,
       waitForContinue: !dryRun,
       names: {},
       skipNames: [],
@@ -253,8 +373,10 @@ async function continueAfterList(matches) {
       action: "continue",
       options: {
         force: !!state.force,
+        experimental: !!state.experimental,
         names,
         skipNames,
+        delaySeconds: state.delaySeconds ?? 4,
       },
     });
   }
@@ -298,19 +420,51 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           sendResponse({ ok: true });
           return;
         }
-        if (msg.action === "cancel") {
+        if (msg.action === "pause") {
           const state = await getState();
           if (state.tabId != null) {
             try {
               await chrome.tabs.sendMessage(state.tabId, {
                 target: "recorder-content",
-                action: "cancel",
+                action: "pause",
               });
             } catch {
               /* ignore */
             }
           }
-          await setState({ status: "idle", message: "Cancelled" });
+          await setState({ status: "paused", message: "Job paused" });
+          sendResponse({ ok: true });
+          return;
+        }
+        if (msg.action === "resume") {
+          const state = await getState();
+          if (state.tabId != null) {
+            try {
+              await chrome.tabs.sendMessage(state.tabId, {
+                target: "recorder-content",
+                action: "resume",
+              });
+            } catch {
+              /* ignore */
+            }
+          }
+          await setState({ status: "running", message: "Resuming downloads…" });
+          sendResponse({ ok: true });
+          return;
+        }
+        if (msg.action === "stop" || msg.action === "cancel") {
+          const state = await getState();
+          if (state.tabId != null) {
+            try {
+              await chrome.tabs.sendMessage(state.tabId, {
+                target: "recorder-content",
+                action: "stop",
+              });
+            } catch {
+              /* ignore */
+            }
+          }
+          await setState({ status: "stopped", message: "Stopping job…" });
           sendResponse({ ok: true });
           return;
         }
@@ -335,6 +489,65 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   }
 
   if (msg.source === "recorder-content") {
+    if (msg.action === "waitForDownloadStart") {
+      if (Date.now() - lastDownloadCreated < 2500 && lastDownloadItem) {
+        const item = lastDownloadItem;
+        lastDownloadItem = null;
+        console.log("[SW] waitForDownloadStart matched recent download:", item.id);
+        sendResponse({ ok: true, downloadId: item.id });
+        return true;
+      }
+      const timeoutMs = msg.timeoutMs || 25000;
+      let timer;
+      const waiter = (downloadItem) => {
+        clearTimeout(timer);
+        console.log("[SW] waitForDownloadStart resolved via onCreated:", downloadItem?.id);
+        sendResponse({ ok: true, downloadId: downloadItem?.id });
+      };
+      timer = setTimeout(() => {
+        const idx = downloadWaiters.indexOf(waiter);
+        if (idx !== -1) downloadWaiters.splice(idx, 1);
+        if (expectedFilenames.length > 0) {
+          const dropped = expectedFilenames.shift();
+          console.warn("[SW] Timeout: dropped unconsumed expected filename:", dropped);
+        }
+        console.warn(`[SW] waitForDownloadStart timed out after ${Math.round(timeoutMs / 1000)}s`);
+        sendResponse({ ok: false, error: `Download did not start within ${Math.round(timeoutMs / 1000)}s` });
+      }, timeoutMs);
+      downloadWaiters.push(waiter);
+      return true;
+    }
+
+    if (msg.action === "downloadTranscriptDirectly") {
+      (async () => {
+        try {
+          const text = msg.text || "";
+          const filename = msg.filename || "transcript.txt";
+          const dataUrl = `data:text/plain;charset=utf-8,${encodeURIComponent(text)}`;
+          directDownloadNames.set(dataUrl, filename);
+          const id = await chrome.downloads.download({
+            url: dataUrl,
+            filename,
+            conflictAction: "uniquify",
+            saveAs: false,
+          });
+          console.log("[SW] downloadTranscriptDirectly succeeded (ID:", id, ") for:", filename);
+          sendResponse({ ok: true, downloadId: id });
+        } catch (err) {
+          directDownloadNames.delete(`data:text/plain;charset=utf-8,${encodeURIComponent(msg.text || "")}`);
+          console.error("[SW] downloadTranscriptDirectly error:", err);
+          sendResponse({ ok: false, error: String(err?.message || err) });
+        }
+      })();
+      return true;
+    }
+
+    if (msg.action === "clearExpectedDownloads") {
+      expectedFilenames.length = 0;
+      sendResponse({ ok: true });
+      return true;
+    }
+
     (async () => {
       const state = await getState();
       switch (msg.type) {
@@ -372,7 +585,9 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           break;
 
         case "expect_download":
-          expectedFilename = msg.filename || null;
+          if (msg.filename) {
+            expectedFilenames.push(msg.filename);
+          }
           break;
 
         case "item_start":
@@ -382,7 +597,6 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
             total: msg.total,
             message: `Downloading ${msg.index + 1} / ${msg.total}: ${msg.title}`,
           });
-          if (msg.suggestedName) expectedFilename = msg.suggestedName;
           break;
 
         case "item_done": {
@@ -420,18 +634,22 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
             (r) => r.status === "failed" || r.status === "click_failed"
           ).length;
           const matched = results.filter((r) => r.status === "matched").length;
-          await setState({
-            status: "complete",
-            results,
-            message: msg.dryRun
+          const finalStatus = msg.stopped ? "stopped" : "complete";
+          const finalMsg = msg.stopped
+            ? `Stopped: ${ok} downloaded · ${skipped} skipped · ${failed} failed`
+            : msg.dryRun
               ? `Dry-run complete: ${matched || results.length} match(es)`
-              : `Done: ${ok} downloaded · ${skipped} skipped · ${failed} failed`,
+              : `Done: ${ok} downloaded · ${skipped} skipped · ${failed} failed`;
+
+          await setState({
+            status: finalStatus,
+            results,
+            message: finalMsg,
           });
           const s = await getState();
-          if (s.exportManifest !== false) {
+          if (s.exportManifest !== false && results.length > 0) {
             await exportManifestFile(s);
           }
-          break;
         }
 
         case "error":

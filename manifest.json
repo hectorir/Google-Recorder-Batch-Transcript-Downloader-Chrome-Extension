@@ -22,7 +22,8 @@
     "scripting",
     "downloads",
     "storage",
-    "alarms"
+    "alarms",
+    "contentSettings"
   ],
   "host_permissions": [
     "https://recorder.google.com/*"
